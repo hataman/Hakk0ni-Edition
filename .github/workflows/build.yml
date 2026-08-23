@@ -1,29 +1,121 @@
-name: Build SpeechHelper
+name: Build Windows Portable
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "src/**"
+      - "resources/**"
+      - "CMakeLists.txt"
+      - "README.txt"
+      - ".github/workflows/build-windows.yml"
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare folders
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force runtime | Out-Null
+          New-Item -ItemType Directory -Force models | Out-Null
+          New-Item -ItemType Directory -Force include\sherpa-onnx\c-api | Out-Null
+          New-Item -ItemType Directory -Force downloads | Out-Null
+
+      - name: Download sherpa-onnx Windows runtime
+        shell: pwsh
+        run: |
+          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-v1.13.4-win-x64-shared-MT-Release-no-tts.tar.bz2"
+          Invoke-WebRequest $url -OutFile downloads\sherpa-runtime.tar.bz2
+          tar -xf downloads\sherpa-runtime.tar.bz2 -C downloads
+
+          $root = Get-ChildItem downloads -Directory |
+            Where-Object { $_.Name -like "sherpa-onnx-v1.13.4-win-x64-shared-MT-Release-no-tts*" } |
+            Select-Object -First 1
+
+          if (-not $root) { throw "Sherpa runtime folder not found" }
+
+          Get-ChildItem $root.FullName -Recurse -Filter *.dll |
+            Copy-Item -Destination runtime -Force
+
+          Get-ChildItem $root.FullName -Recurse -Filter *.lib |
+            Copy-Item -Destination runtime -Force
+
+          $header = Get-ChildItem $root.FullName -Recurse -Filter c-api.h |
+            Where-Object { $_.FullName -match "c-api" } |
+            Select-Object -First 1
+
+          if ($header) {
+            Copy-Item $header.FullName include\sherpa-onnx\c-api\c-api.h -Force
+          } else {
+            Invoke-WebRequest `
+              "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.4/sherpa-onnx/c-api/c-api.h" `
+              -OutFile include\sherpa-onnx\c-api\c-api.h
+          }
+
+      - name: Download Whisper Small multilingual INT8
+        shell: pwsh
+        run: |
+          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2"
+          Invoke-WebRequest $url -OutFile downloads\whisper-small.tar.bz2
+          tar -xf downloads\whisper-small.tar.bz2 -C downloads
+
+          $model = Get-ChildItem downloads -Directory |
+            Where-Object { $_.Name -eq "sherpa-onnx-whisper-small" } |
+            Select-Object -First 1
+
+          if (-not $model) { throw "Whisper Small model folder not found" }
+
+          Copy-Item "$($model.FullName)\small-encoder.int8.onnx" models\ -Force
+          Copy-Item "$($model.FullName)\small-decoder.int8.onnx" models\ -Force
+          Copy-Item "$($model.FullName)\small-tokens.txt" models\ -Force
+
+          Write-Host "Model files:"
+          Get-ChildItem models
+
+      - name: Create default config
+        shell: pwsh
+        run: |
+          @"
+          language=tr
+          hotkey_mods=0
+          hotkey_vk=164
+          "@ | Set-Content config.txt -Encoding ascii
+
       - name: Configure
-        run: cmake -S . -B build -A x64
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64
 
-      - name: Build
-        run: cmake --build build --config Release
+      - name: Build Release
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel 2
 
-      - name: Upload EXE
+      - name: Assemble portable folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist\SpeechHelper\models | Out-Null
+
+          Copy-Item build\Release\SpeechHelper.exe dist\SpeechHelper\ -Force
+          Copy-Item runtime\*.dll dist\SpeechHelper\ -Force
+          Copy-Item models\small-encoder.int8.onnx dist\SpeechHelper\models\ -Force
+          Copy-Item models\small-decoder.int8.onnx dist\SpeechHelper\models\ -Force
+          Copy-Item models\small-tokens.txt dist\SpeechHelper\models\ -Force
+          Copy-Item README.txt dist\SpeechHelper\ -Force
+          Copy-Item config.txt dist\SpeechHelper\ -Force
+
+          Write-Host "Portable package:"
+          Get-ChildItem dist\SpeechHelper -Recurse
+
+      - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SpeechHelper-Hakk0ni-Edition
-          path: |
-            build/Release/*.exe
-            build/Release/*.dll
+          name: SpeechHelper-Windows-x64
+          path: dist/SpeechHelper
+          if-no-files-found: error
