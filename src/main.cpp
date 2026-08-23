@@ -363,8 +363,43 @@ static std::atomic<int> g_hotkeyVk{VK_LMENU};
 
 static std::atomic<bool> g_capturingHotkey{false};
 static HWND g_hotkeyValue = nullptr;
+static HHOOK g_keyboardHook = nullptr;
+
+static bool ModifierMaskDown(int mods);
 
 static constexpr UINT_PTR HOTKEY_CAPTURE_TIMER = 1;
+
+static LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code < 0) {
+        return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
+    }
+
+    const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+    if (!key || (key->flags & LLKHF_INJECTED)) {
+        return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
+    }
+
+    if (g_capturingHotkey.load()) {
+        return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
+    }
+
+    const int hotkeyVk = g_hotkeyVk.load();
+    if (hotkeyVk == 0 || static_cast<int>(key->vkCode) != hotkeyVk) {
+        return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
+    }
+
+    const int mods = g_hotkeyMods.load();
+    if (!ModifierMaskDown(mods)) {
+        return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
+    }
+
+    if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN ||
+        wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+        return 1;
+    }
+
+    return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
+}
 
 
 static bool IsModifierVk(int vk) {
@@ -1335,6 +1370,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 static void SettingsWindowThread() {
     HINSTANCE hInst = GetModuleHandleA(nullptr);
 
+    g_keyboardHook = SetWindowsHookExA(
+        WH_KEYBOARD_LL,
+        KeyboardHookProc,
+        hInst,
+        0
+    );
+
     WNDCLASSA wc{};
     wc.lpfnWndProc = SettingsWndProc;
     wc.hInstance = hInst;
@@ -1382,6 +1424,11 @@ static void SettingsWindowThread() {
     while (GetMessageA(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
+    }
+
+    if (g_keyboardHook) {
+        UnhookWindowsHookEx(g_keyboardHook);
+        g_keyboardHook = nullptr;
     }
 }
 
