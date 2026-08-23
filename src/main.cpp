@@ -1,5 +1,4 @@
-﻿
-#define WIN32_LEAN_AND_MEAN
+﻿#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
 #include <mmsystem.h>
@@ -357,27 +356,10 @@ enum HotkeyMods : int {
     HOTKEY_MOD_WIN   = 1 << 3,
 };
 
-enum SpeechMode : int {
-    SPEECH_NORMAL = 0,
-    SPEECH_ME = 1,
-    SPEECH_DO = 2,
-    SPEECH_OOC = 3,
-    SPEECH_WHISPER = 4,
-    SPEECH_MODE_COUNT = 5
-};
-
-static std::atomic<int> g_hotkeyMods[SPEECH_MODE_COUNT] = {
-    HOTKEY_MOD_NONE, HOTKEY_MOD_NONE, HOTKEY_MOD_NONE,
-    HOTKEY_MOD_NONE, HOTKEY_MOD_NONE
-};
-
-static std::atomic<int> g_hotkeyVk[SPEECH_MODE_COUNT] = {
-    VK_LMENU, 0, 0, 0, 0
-};
+static std::atomic<int> g_hotkeyMods{HOTKEY_MOD_NONE};
+static std::atomic<int> g_hotkeyVk{VK_LMENU};
 
 static std::atomic<bool> g_capturingHotkey{false};
-static std::atomic<int> g_captureTarget{SPEECH_NORMAL};
-static HWND g_hotkeyValues[SPEECH_MODE_COUNT] = {};
 static HWND g_hotkeyValue = nullptr;
 
 static constexpr UINT_PTR HOTKEY_CAPTURE_TIMER = 1;
@@ -471,61 +453,6 @@ static bool ModifierMaskDown(int mods) {
 
     return true;
 }
-static fs::path SpeechBridgePath() {
-    char* profile = nullptr;
-    size_t len = 0;
-
-    if (_dupenv_s(&profile, &len, "USERPROFILE") != 0 ||
-        !profile || !*profile) {
-        if (profile) free(profile);
-        return {};
-    }
-
-    const fs::path result =
-        fs::path(profile) / "Zomboid" / "Lua" / "SpeechHelper.txt";
-
-    free(profile);
-    return result;
-}
-
-static bool SendTextToProjectZomboid(const std::string& text) {
-    if (text.empty()) return false;
-
-    const fs::path target = SpeechBridgePath();
-    if (target.empty()) return false;
-
-    std::error_code ec;
-    fs::create_directories(target.parent_path(), ec);
-    if (ec) {
-        std::cerr << "[PZ] failed to create bridge directory: " << ec.message() << "\n";
-        return false;
-    }
-
-    const fs::path temp = target.string() + ".tmp";
-    {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            std::cerr << "[PZ] failed to open bridge file for writing\n";
-            return false;
-        }
-        out << text << "\n";
-        out.flush();
-        if (!out) {
-            std::cerr << "[PZ] failed to write bridge file\n";
-            return false;
-        }
-    }
-
-    if (!MoveFileExA(temp.string().c_str(), target.string().c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        std::cerr << "[PZ] failed to publish bridge file: " << GetLastError() << "\n";
-        DeleteFileA(temp.string().c_str());
-        return false;
-    }
-
-    return true;
-}
-
 static std::string HotkeyKeyName(int vk) {
     switch (vk) {
     case VK_MENU: return "ALT";
@@ -581,30 +508,13 @@ static std::string HotkeyBindingName(int mods, int key) {
     return out.empty() ? "None" : out;
 }
 
-static bool IsSpeechHotkeyDown(int mode) {
-    if (mode < 0 || mode >= SPEECH_MODE_COUNT) return false;
-
-    const int mods = g_hotkeyMods[mode].load();
-    const int key = g_hotkeyVk[mode].load();
+static bool IsSpeechHotkeyDown() {
+    const int mods = g_hotkeyMods.load();
+    const int key = g_hotkeyVk.load();
 
     if (key == 0) return false;
     if (!ModifierMaskDown(mods)) return false;
     return (GetAsyncKeyState(key) & 0x8000) != 0;
-}
-
-static const char* SpeechModePrefix(int mode) {
-    switch (mode) {
-    case SPEECH_ME: return "/me ";
-    case SPEECH_DO: return "/do ";
-    case SPEECH_OOC: return "/ooc ";
-    case SPEECH_WHISPER: return "/w ";
-    default: return "";
-    }
-}
-
-static std::string FormatOutgoingText(int mode, const std::string& text) {
-    if (text.empty()) return {};
-    return std::string(SpeechModePrefix(mode)) + text;
 }
 
 static int LegacyModifierVkToMask(int vk) {
@@ -678,45 +588,13 @@ static int LoadHotkeyMods() {
     return LegacyModifierVkToMask(legacyModVk);
 }
 
-static int LoadConfigInt(const std::string& key, int fallback) {
-    std::ifstream f("config.txt");
-    if (!f) return fallback;
-
-    const std::string prefix = key + "=";
-    std::string line;
-
-    while (std::getline(f, line)) {
-        if (line.rfind(prefix, 0) == 0) {
-            try {
-                return std::stoi(line.substr(prefix.size()));
-            } catch (...) {
-                return fallback;
-            }
-        }
-    }
-
-    return fallback;
-}
-
 static void WriteConfig(const std::string& language) {
     std::ofstream f("config.txt", std::ios::trunc);
     f << "language=" << language << "\n";
-
-    f << "hotkey_mods=" << g_hotkeyMods[SPEECH_NORMAL].load() << "\n";
-    f << "hotkey_vk=" << g_hotkeyVk[SPEECH_NORMAL].load() << "\n";
-
-    f << "me_mods=" << g_hotkeyMods[SPEECH_ME].load() << "\n";
-    f << "me_vk=" << g_hotkeyVk[SPEECH_ME].load() << "\n";
-
-    f << "do_mods=" << g_hotkeyMods[SPEECH_DO].load() << "\n";
-    f << "do_vk=" << g_hotkeyVk[SPEECH_DO].load() << "\n";
-
-    f << "ooc_mods=" << g_hotkeyMods[SPEECH_OOC].load() << "\n";
-    f << "ooc_vk=" << g_hotkeyVk[SPEECH_OOC].load() << "\n";
-
-    f << "w_mods=" << g_hotkeyMods[SPEECH_WHISPER].load() << "\n";
-    f << "w_vk=" << g_hotkeyVk[SPEECH_WHISPER].load() << "\n";
+    f << "hotkey_mods=" << g_hotkeyMods.load() << "\n";
+    f << "hotkey_vk=" << g_hotkeyVk.load() << "\n";
 }
+
 static void RequestLanguageReload(const std::string& code) {
     {
         std::lock_guard<std::mutex> lock(g_languageMutex);
@@ -810,11 +688,7 @@ enum : int {
     IDC_HISTORY = 1004,
     IDC_CLEAR = 1005,
 
-    IDC_NORMAL_CHANGE = 1010,
-    IDC_ME_CHANGE = 1011,
-    IDC_DO_CHANGE = 1012,
-    IDC_OOC_CHANGE = 1013,
-    IDC_W_CHANGE = 1014
+    IDC_NORMAL_CHANGE = 1010
 };
 
 static const struct {
@@ -840,28 +714,21 @@ static void SaveLanguageCode(const std::string& code) {
     RequestLanguageReload(code);
 }
 
-static void RefreshHotkeyLabelFromSavedBinding(int mode) {
-    if (mode < 0 || mode >= SPEECH_MODE_COUNT) return;
+static void RefreshHotkeyLabelFromSavedBinding() {
+    if (!g_hotkeyValue) return;
 
-    HWND value = g_hotkeyValues[mode];
-    if (!value) return;
-
-    const int mods = g_hotkeyMods[mode].load();
-    const int key = g_hotkeyVk[mode].load();
-    const std::string label = HotkeyBindingName(mods, key);
-    SetWindowTextA(value, label.c_str());
+    const std::string label =
+        HotkeyBindingName(g_hotkeyMods.load(), g_hotkeyVk.load());
+    SetWindowTextA(g_hotkeyValue, label.c_str());
 }
 
-static void SaveHotkeyBinding(int mode, int mods, int vk) {
-    if (mode < 0 || mode >= SPEECH_MODE_COUNT) return;
-
-    g_hotkeyMods[mode].store(mods);
-    g_hotkeyVk[mode].store(vk);
+static void SaveHotkeyBinding(int mods, int vk) {
+    g_hotkeyMods.store(mods);
+    g_hotkeyVk.store(vk);
 
     WriteConfig(LoadLanguageCode());
-    RefreshHotkeyLabelFromSavedBinding(mode);
+    RefreshHotkeyLabelFromSavedBinding();
 }
-
 
 static int FindLanguageIndex(const std::string& code) {
     for (int i = 0; i < static_cast<int>(sizeof(kLanguages) / sizeof(kLanguages[0])); ++i) {
@@ -935,18 +802,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             315, 14, 80, 25,
             hwnd, reinterpret_cast<HMENU>(IDC_SAVE), nullptr, nullptr);
 
-        // Normal speech stays separate.
         CreateWindowA("STATIC", "Talk:",
             WS_CHILD | WS_VISIBLE,
             20, 54, 45, 20,
             hwnd, nullptr, nullptr, nullptr);
 
-        g_hotkeyValues[SPEECH_NORMAL] = CreateWindowA(
+        g_hotkeyValue = CreateWindowA(
             "STATIC",
-            HotkeyBindingName(
-                g_hotkeyMods[SPEECH_NORMAL].load(),
-                g_hotkeyVk[SPEECH_NORMAL].load()
-            ).c_str(),
+            HotkeyBindingName(g_hotkeyMods.load(), g_hotkeyVk.load()).c_str(),
             WS_CHILD | WS_VISIBLE,
             70, 54, 120, 20,
             hwnd, nullptr, nullptr, nullptr);
@@ -958,62 +821,20 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_NORMAL_CHANGE)),
             nullptr, nullptr);
 
-        CreateWindowA("STATIC", "RP Shortcuts:",
-            WS_CHILD | WS_VISIBLE,
-            20, 88, 120, 20,
-            hwnd, nullptr, nullptr, nullptr);
-
-        const struct {
-            const char* label;
-            int mode;
-            int changeId;
-            int x;
-            int y;
-        } rpRows[] = {
-            {"/me:",  SPEECH_ME,      IDC_ME_CHANGE,  20, 116},
-            {"/do:",  SPEECH_DO,      IDC_DO_CHANGE,  290, 116},
-            {"/ooc:", SPEECH_OOC,     IDC_OOC_CHANGE, 20, 148},
-            {"/w:",   SPEECH_WHISPER, IDC_W_CHANGE,   290, 148},
-        };
-
-        for (const auto& row : rpRows) {
-            CreateWindowA("STATIC", row.label,
-                WS_CHILD | WS_VISIBLE,
-                row.x, row.y, 45, 20,
-                hwnd, nullptr, nullptr, nullptr);
-
-            g_hotkeyValues[row.mode] = CreateWindowA(
-                "STATIC",
-                HotkeyBindingName(
-                    g_hotkeyMods[row.mode].load(),
-                    g_hotkeyVk[row.mode].load()
-                ).c_str(),
-                WS_CHILD | WS_VISIBLE,
-                row.x + 50, row.y, 120, 20,
-                hwnd, nullptr, nullptr, nullptr);
-
-            CreateWindowA("BUTTON", "Change",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                row.x + 175, row.y - 4, 80, 25,
-                hwnd,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(row.changeId)),
-                nullptr, nullptr);
-        }
-
         CreateWindowA("STATIC", "Status:",
             WS_CHILD | WS_VISIBLE,
-            20, 188, 80, 20,
+            20, 94, 80, 20,
             hwnd, nullptr, nullptr, nullptr);
 
         status = CreateWindowA("STATIC", "Ready",
             WS_CHILD | WS_VISIBLE,
-            100, 188, 210, 20,
+            100, 94, 210, 20,
             hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
         g_status = status;
 
         CreateWindowA("STATIC", "Conversation history:",
             WS_CHILD | WS_VISIBLE,
-            20, 222, 180, 20,
+            20, 128, 180, 20,
             hwnd, nullptr, nullptr, nullptr);
 
         RECT rc{};
@@ -1023,15 +844,15 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL |
             ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | ES_WANTRETURN,
-            20, 246,
+            20, 152,
             (std::max)(200L, rc.right - 40),
-            (std::max)(120L, rc.bottom - 296),
+            (std::max)(120L, rc.bottom - 202),
             hwnd, reinterpret_cast<HMENU>(IDC_HISTORY), nullptr, nullptr);
         g_history = history;
 
         clearButton = CreateWindowA("BUTTON", "Clear history",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            20, (std::max)(250L, rc.bottom - 40), 110, 30,
+            20, (std::max)(156L, rc.bottom - 40), 110, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_CLEAR), nullptr, nullptr);
 
         return 0;
@@ -1044,9 +865,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         if (history) {
             MoveWindow(
                 history,
-                20, 246,
+                20, 152,
                 (std::max)(200, clientW - 40),
-                (std::max)(120, clientH - 296),
+                (std::max)(120, clientH - 202),
                 TRUE
             );
         }
@@ -1054,7 +875,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         if (clearButton) {
             MoveWindow(
                 clearButton,
-                20, (std::max)(250, clientH - 40),
+                20, (std::max)(156, clientH - 40),
                 110, 30,
                 TRUE
             );
@@ -1067,7 +888,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
         if (info) {
             info->ptMinTrackSize.x = 580;
-            info->ptMinTrackSize.y = 520;
+            info->ptMinTrackSize.y = 420;
         }
         return 0;
     }
@@ -1095,11 +916,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 return 0;
             }
 
-            const int mode = g_captureTarget.load();
-
-            // Save only a non-modifier main key. This is what finally kills
-            // "CTRL + Ctrl" / "SHIFT + Shift".
-            SaveHotkeyBinding(mode, mods, key);
+            SaveHotkeyBinding(mods, key);
 
             g_capturingHotkey.store(false);
             captureWaitingForRelease = false;
@@ -1123,17 +940,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     case WM_COMMAND: {
         const int commandId = LOWORD(wParam);
 
-        int captureMode = -1;
-        if (commandId == IDC_NORMAL_CHANGE) captureMode = SPEECH_NORMAL;
-        else if (commandId == IDC_ME_CHANGE) captureMode = SPEECH_ME;
-        else if (commandId == IDC_DO_CHANGE) captureMode = SPEECH_DO;
-        else if (commandId == IDC_OOC_CHANGE) captureMode = SPEECH_OOC;
-        else if (commandId == IDC_W_CHANGE) captureMode = SPEECH_WHISPER;
-
-        if (captureMode >= 0) {
-            g_captureTarget.store(captureMode);
-            g_hotkeyValue = g_hotkeyValues[captureMode];
-
+        if (commandId == IDC_NORMAL_CHANGE) {
             captureWaitingForRelease = true;
             g_capturingHotkey.store(true);
 
@@ -1222,22 +1029,8 @@ static void SettingsWindowThread() {
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     SetConsoleOutputCP(CP_UTF8);
 
-    // Load persistent bindings before the settings window is created so the
-    // GUI never briefly shows the old default while config.txt is being read.
-    g_hotkeyMods[SPEECH_NORMAL].store(LoadHotkeyMods());
-    g_hotkeyVk[SPEECH_NORMAL].store(LoadHotkeyVk());
-
-    g_hotkeyMods[SPEECH_ME].store(LoadConfigInt("me_mods", HOTKEY_MOD_NONE));
-    g_hotkeyVk[SPEECH_ME].store(LoadConfigInt("me_vk", 0));
-
-    g_hotkeyMods[SPEECH_DO].store(LoadConfigInt("do_mods", HOTKEY_MOD_NONE));
-    g_hotkeyVk[SPEECH_DO].store(LoadConfigInt("do_vk", 0));
-
-    g_hotkeyMods[SPEECH_OOC].store(LoadConfigInt("ooc_mods", HOTKEY_MOD_NONE));
-    g_hotkeyVk[SPEECH_OOC].store(LoadConfigInt("ooc_vk", 0));
-
-    g_hotkeyMods[SPEECH_WHISPER].store(LoadConfigInt("w_mods", HOTKEY_MOD_NONE));
-    g_hotkeyVk[SPEECH_WHISPER].store(LoadConfigInt("w_vk", 0));
+    g_hotkeyMods.store(LoadHotkeyMods());
+    g_hotkeyVk.store(LoadHotkeyVk());
 
     std::thread settingsThread(SettingsWindowThread);
     settingsThread.detach();
@@ -1256,12 +1049,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     std::cout << "SpeechHelper v4-small\n";
     std::cout << "Portable / offline prototype\n";
     std::cout << "sherpa-onnx: " << SherpaOnnxGetVersionStr() << "\n";
-    std::cout << "Talk: " << HotkeyBindingName(g_hotkeyMods[SPEECH_NORMAL].load(), g_hotkeyVk[SPEECH_NORMAL].load()) << "\n";
-    std::cout << "/me: " << HotkeyBindingName(g_hotkeyMods[SPEECH_ME].load(), g_hotkeyVk[SPEECH_ME].load()) << "\n";
-    std::cout << "/do: " << HotkeyBindingName(g_hotkeyMods[SPEECH_DO].load(), g_hotkeyVk[SPEECH_DO].load()) << "\n";
-    std::cout << "/ooc: " << HotkeyBindingName(g_hotkeyMods[SPEECH_OOC].load(), g_hotkeyVk[SPEECH_OOC].load()) << "\n";
-    std::cout << "/w: " << HotkeyBindingName(g_hotkeyMods[SPEECH_WHISPER].load(), g_hotkeyVk[SPEECH_WHISPER].load()) << "\n";
-    std::cout << "PZ bridge: " << SpeechBridgePath().string() << "\n";
+    std::cout << "Talk: "
+              << HotkeyBindingName(g_hotkeyMods.load(), g_hotkeyVk.load())
+              << "\n";
     std::cout << "ESC: exit\n\n";
 
     if (!fs::exists(encoder) ||
@@ -1292,7 +1082,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
     AudioCapture capture;
 
-    int activeSpeechMode = -1;
     bool captureActive = false;
 
     while (true) {
@@ -1316,41 +1105,24 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             break;
         }
 
-        // While the settings window is capturing a new binding, the normal
-        // speech hotkey must be completely disabled. This prevents ALT/CTRL/etc.
-        // from starting a recording at the same time as key capture.
         if (g_capturingHotkey.load()) {
             if (captureActive) {
                 capture.Stop();
                 captureActive = false;
             }
-            activeSpeechMode = -1;
             std::this_thread::sleep_for(std::chrono::milliseconds(8));
             continue;
         }
 
-        if (activeSpeechMode < 0) {
-            int pressedMode = -1;
-
-            for (int mode = 0; mode < SPEECH_MODE_COUNT; ++mode) {
-                if (IsSpeechHotkeyDown(mode)) {
-                    pressedMode = mode;
-                    break;
-                }
-            }
-
-            if (pressedMode >= 0) {
+        if (!captureActive) {
+            if (IsSpeechHotkeyDown()) {
                 if (capture.Start()) {
-                    activeSpeechMode = pressedMode;
                     captureActive = true;
                     PostUiStatus("Listening");
-                    std::cout << "[HOTKEY] recording mode=" << pressedMode << "\n";
+                    std::cout << "[HOTKEY] recording\n";
                 }
             }
-        } else if (!IsSpeechHotkeyDown(activeSpeechMode)) {
-            const int finishedMode = activeSpeechMode;
-            activeSpeechMode = -1;
-
+        } else if (!IsSpeechHotkeyDown()) {
             auto samples = capture.Stop();
             captureActive = false;
 
@@ -1402,19 +1174,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                     std::cout << "[STT] ignored non-speech label: "
                               << recognized << "\n\n";
                 } else {
-                    const std::string outgoing =
-                        FormatOutgoingText(finishedMode, recognized);
-
-                    PostUiText(outgoing);
-
-                    const bool sentToPz =
-                        SendTextToProjectZomboid(outgoing);
-
-                    PostUiStatus(sentToPz ? "Ready" : "PZ send failed");
-                    std::cout << "[TEXT] " << outgoing << "\n";
-                    std::cout << "[PZ] "
-                              << (sentToPz ? "sent" : "send failed")
-                              << "\n\n";
+                    PostUiText(recognized);
+                    PostUiStatus("Ready");
+                    std::cout << "[TEXT] " << recognized << "\n\n";
                 }
             }
         }
