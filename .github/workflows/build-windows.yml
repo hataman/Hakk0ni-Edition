@@ -1,4 +1,4 @@
-name: Build Windows Portable
+name: Build Hakk0ni Edition
 
 on:
   workflow_dispatch:
@@ -100,22 +100,22 @@ jobs:
       - name: Assemble portable folder
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist\SpeechHelper\models | Out-Null
+          New-Item -ItemType Directory -Force dist\Hakk0niEdition\models | Out-Null
 
-          Copy-Item build\Release\SpeechHelper.exe dist\SpeechHelper\ -Force
-          Copy-Item runtime\*.dll dist\SpeechHelper\ -Force
-          Copy-Item models\small-encoder.int8.onnx dist\SpeechHelper\models\ -Force
-          Copy-Item models\small-decoder.int8.onnx dist\SpeechHelper\models\ -Force
-          Copy-Item models\small-tokens.txt dist\SpeechHelper\models\ -Force
-          Copy-Item README.txt dist\SpeechHelper\ -Force
-          Copy-Item config.txt dist\SpeechHelper\ -Force
+          Copy-Item build\Release\Hakk0niEdition.exe dist\Hakk0niEdition\ -Force
+          Copy-Item runtime\*.dll dist\Hakk0niEdition\ -Force
+          Copy-Item models\small-encoder.int8.onnx dist\Hakk0niEdition\models\ -Force
+          Copy-Item models\small-decoder.int8.onnx dist\Hakk0niEdition\models\ -Force
+          Copy-Item models\small-tokens.txt dist\Hakk0niEdition\models\ -Force
+          Copy-Item README.txt dist\Hakk0niEdition\ -Force
+          Copy-Item config.txt dist\Hakk0niEdition\ -Force
 
           Write-Host "Portable package:"
-          Get-ChildItem dist\SpeechHelper -Recurse
+          Get-ChildItem dist\Hakk0niEdition -Recurse
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SpeechHelper-Windows-x64
-          path: dist/SpeechHelper
+          name: Hakk0niEdition-Windows-x64
+          path: dist/Hakk0niEdition
           if-no-files-found: error

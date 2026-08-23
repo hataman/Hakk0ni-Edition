@@ -1,4 +1,4 @@
-﻿
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
@@ -592,12 +592,9 @@ static int LoadHotkeyMods() {
 
 static void WriteConfig(const std::string& language) {
     std::ofstream f("config.txt", std::ios::trunc);
-    f << "language=" << language << "
-";
-    f << "hotkey_mods=" << g_hotkeyMods.load() << "
-";
-    f << "hotkey_vk=" << g_hotkeyVk.load() << "
-";
+    f << "language=" << language << "\n";
+    f << "hotkey_mods=" << g_hotkeyMods.load() << "\n";
+    f << "hotkey_vk=" << g_hotkeyVk.load() << "\n";
 }
 static void RequestLanguageReload(const std::string& code) {
     {
@@ -969,7 +966,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         bodyFont = MakeFont(14, FW_NORMAL);
         smallFont = MakeFont(12, FW_NORMAL);
 
-        Label(hwnd, "SpeechHelper", 32, 18, 210, 30, titleFont);
+        Label(hwnd, "Hakk0ni Edition", 32, 18, 210, 30, titleFont);
         Label(hwnd, "Speech-to-text for Windows", 32, 48, 340, 20, smallFont);
 
         Button(hwnd, "Language", IDC_TAB_LANGUAGE, 32, 82, 112, 34);
@@ -1341,7 +1338,7 @@ static void SettingsWindowThread() {
     WNDCLASSA wc{};
     wc.lpfnWndProc = SettingsWndProc;
     wc.hInstance = hInst;
-    wc.lpszClassName = "SpeechHelperSettingsWindow";
+    wc.lpszClassName = "Hakk0niEditionSettingsWindow";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = CreateSolidBrush(SettingsUi::Background);
     wc.hIcon = LoadIconA(hInst, MAKEINTRESOURCEA(101));
@@ -1351,7 +1348,7 @@ static void SettingsWindowThread() {
     HWND hwnd = CreateWindowExA(
         0,
         wc.lpszClassName,
-        "SpeechHelper - Hakk0ni Edition",
+        "Hakk0ni Edition",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         760, 650,
@@ -1410,7 +1407,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     const fs::path tokens =
         base / "models" / "small-tokens.txt";
 
-    std::cout << "SpeechHelper v4-small\n";
+    std::cout << "Hakk0ni Edition v4-small\n";
     std::cout << "Portable / offline prototype\n";
     std::cout << "sherpa-onnx: " << SherpaOnnxGetVersionStr() << "\n";
     std::cout << "Talk: " << HotkeyBindingName(g_hotkeyMods.load(), g_hotkeyVk.load()) << "\n";

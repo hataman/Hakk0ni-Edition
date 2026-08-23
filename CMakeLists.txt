@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SpeechHelper LANGUAGES CXX)
+project(Hakk0niEdition LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,12 +9,12 @@ if (MSVC)
 endif()
 
 # WIN32 = GUI subsystem: no black console window.
-add_executable(SpeechHelper WIN32
+add_executable(Hakk0niEdition WIN32
     src/main.cpp
     resources/speechhelper.rc
 )
 
-target_include_directories(SpeechHelper PRIVATE
+target_include_directories(Hakk0niEdition PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
@@ -29,12 +29,12 @@ if (NOT SHERPA_ONNX_LIB)
     message(FATAL_ERROR "sherpa-onnx C API import library not found in runtime/")
 endif()
 
-target_link_libraries(SpeechHelper PRIVATE
+target_link_libraries(Hakk0niEdition PRIVATE
     winmm
     comctl32
     ${SHERPA_ONNX_LIB}
 )
 
 if (MSVC)
-    target_compile_options(SpeechHelper PRIVATE /W4 /O2)
+    target_compile_options(Hakk0niEdition PRIVATE /W4 /O2)
 endif()
