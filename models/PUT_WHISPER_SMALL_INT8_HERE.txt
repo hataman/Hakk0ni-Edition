@@ -1,0 +1,4 @@
+Place these Whisper Small INT8 files here:
+small-encoder.int8.onnx
+small-decoder.int8.onnx
+small-tokens.txt
