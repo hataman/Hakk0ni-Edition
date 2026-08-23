@@ -393,8 +393,7 @@ static LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wParam, LPARAM lParam)
         return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
     }
 
-    if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN ||
-        wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+    if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
         return 1;
     }
 
