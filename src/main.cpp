@@ -344,6 +344,7 @@ static constexpr UINT WM_APP_STT_STATUS = WM_APP + 2;
 static HWND g_mainWindow = nullptr;
 static HWND g_history = nullptr;
 static HWND g_status = nullptr;
+static HWND resetButton = nullptr;
 
 static std::mutex g_languageMutex;
 static std::string g_requestedLanguage = "tr";
@@ -508,13 +509,13 @@ static std::string HotkeyBindingName(int mods, int key) {
 
     return out.empty() ? "None" : out;
 }
-
 static bool IsSpeechHotkeyDown() {
     const int mods = g_hotkeyMods.load();
     const int key = g_hotkeyVk.load();
 
-    if (key == 0) return false;
     if (!ModifierMaskDown(mods)) return false;
+    if (key == 0) return mods != HOTKEY_MOD_NONE;
+
     return (GetAsyncKeyState(key) & 0x8000) != 0;
 }
 
@@ -549,7 +550,7 @@ static int LoadHotkeyVk() {
         try {
             if (line.rfind(newKey, 0) == 0) {
                 int value = std::stoi(line.substr(newKey.size()));
-                if (value > 0 && value < 256) return value;
+                if (value >= 0 && value < 256) return value;
             }
 
             if (line.rfind(oldKey, 0) == 0) {
@@ -591,11 +592,13 @@ static int LoadHotkeyMods() {
 
 static void WriteConfig(const std::string& language) {
     std::ofstream f("config.txt", std::ios::trunc);
-    f << "language=" << language << "\n";
-    f << "hotkey_mods=" << g_hotkeyMods.load() << "\n";
-    f << "hotkey_vk=" << g_hotkeyVk.load() << "\n";
+    f << "language=" << language << "
+";
+    f << "hotkey_mods=" << g_hotkeyMods.load() << "
+";
+    f << "hotkey_vk=" << g_hotkeyVk.load() << "
+";
 }
-
 static void RequestLanguageReload(const std::string& code) {
     {
         std::lock_guard<std::mutex> lock(g_languageMutex);
@@ -685,9 +688,7 @@ static bool IsNonSpeechLabel(const std::string& raw) {
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
 
     if (s.empty()) return true;
-
-    // Whisper can emit incomplete captions such as "[Music playing"
-    // without a closing bracket. Any caption-like result is not speech.
+    
     if (s.front() == '[' || s.front() == '(') return true;
 
     std::string lower = s;
@@ -716,8 +717,11 @@ enum : int {
     IDC_STATUS = 1003,
     IDC_HISTORY = 1004,
     IDC_CLEAR = 1005,
-
-    IDC_NORMAL_CHANGE = 1010
+    IDC_TAB_LANGUAGE = 1006,
+    IDC_TAB_SHORTCUTS = 1007,
+    IDC_TAB_ACTIVITY = 1008,
+    IDC_NORMAL_CHANGE = 1010,
+    IDC_RESET_SHORTCUTS = 1015
 };
 
 static const struct {
@@ -743,12 +747,23 @@ static void SaveLanguageCode(const std::string& code) {
     RequestLanguageReload(code);
 }
 
+static void SetHotkeyValueText(HWND control, const char* text) {
+    if (!control) return;
+    HWND parent = GetParent(control);
+    RECT redraw{};
+    GetWindowRect(control, &redraw);
+    MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&redraw), 2);
+    InflateRect(&redraw, 2, 2);
+    SetWindowTextA(control, text);
+    RedrawWindow(parent, &redraw, nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
 static void RefreshHotkeyLabelFromSavedBinding() {
     if (!g_hotkeyValue) return;
 
-    const std::string label =
-        HotkeyBindingName(g_hotkeyMods.load(), g_hotkeyVk.load());
-    SetWindowTextA(g_hotkeyValue, label.c_str());
+    const std::string label = HotkeyBindingName(g_hotkeyMods.load(), g_hotkeyVk.load());
+    SetHotkeyValueText(g_hotkeyValue, label.c_str());
 }
 
 static void SaveHotkeyBinding(int mods, int vk) {
@@ -759,6 +774,7 @@ static void SaveHotkeyBinding(int mods, int vk) {
     RefreshHotkeyLabelFromSavedBinding();
 }
 
+
 static int FindLanguageIndex(const std::string& code) {
     for (int i = 0; i < static_cast<int>(sizeof(kLanguages) / sizeof(kLanguages[0])); ++i) {
         if (code == kLanguages[i].code) return i;
@@ -766,12 +782,137 @@ static int FindLanguageIndex(const std::string& code) {
     return 0;
 }
 
+namespace SettingsUi {
+constexpr COLORREF Background = RGB(14, 17, 23);
+constexpr COLORREF Surface = RGB(23, 27, 35);
+constexpr COLORREF SurfaceRaised = RGB(31, 36, 46);
+constexpr COLORREF Border = RGB(49, 56, 70);
+constexpr COLORREF Text = RGB(235, 238, 245);
+constexpr COLORREF Muted = RGB(147, 156, 174);
+constexpr COLORREF Accent = RGB(119, 92, 255);
+constexpr COLORREF AccentHover = RGB(137, 113, 255);
+constexpr COLORREF Success = RGB(87, 214, 153);
+
+static HBRUSH backgroundBrush = nullptr;
+static HBRUSH surfaceBrush = nullptr;
+static HBRUSH fieldBrush = nullptr;
+static HFONT titleFont = nullptr;
+static HFONT headingFont = nullptr;
+static HFONT bodyFont = nullptr;
+static HFONT smallFont = nullptr;
+
+static HFONT MakeFont(int pixels, int weight) {
+    return CreateFontA(-pixels, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+}
+
+static void SetFont(HWND control, HFONT font) {
+    SendMessageA(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
+
+static HWND Label(HWND parent, const char* text, int x, int y, int w, int h,
+                  HFONT font = nullptr) {
+    HWND result = CreateWindowA("STATIC", text, WS_CHILD | WS_VISIBLE,
+        x, y, w, h, parent, nullptr, nullptr, nullptr);
+    SetFont(result, font ? font : bodyFont);
+    return result;
+}
+
+static HWND Button(HWND parent, const char* text, int id,
+                   int x, int y, int w, int h) {
+    HWND result = CreateWindowA("BUTTON", text,
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
+        x, y, w, h, parent,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
+    SetFont(result, bodyFont);
+    return result;
+}
+
+static void FillRoundedRect(HDC dc, const RECT& rect, COLORREF color, int radius) {
+    HBRUSH brush = CreateSolidBrush(color);
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+}
+
+static LRESULT CALLBACK ComboProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                  LPARAM lParam, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rect{};
+        GetClientRect(hwnd, &rect);
+        FillRect(dc, &rect, fieldBrush);
+
+        char value[80]{};
+        GetWindowTextA(hwnd, value, static_cast<int>(sizeof(value)));
+        RECT textRect = rect;
+        textRect.left += 12;
+        textRect.right -= 34;
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, Text);
+        HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(dc, bodyFont));
+        DrawTextA(dc, value, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        const int centerX = rect.right - 17;
+        const int centerY = (rect.bottom - rect.top) / 2;
+        HPEN arrowPen = CreatePen(PS_SOLID, 2, Muted);
+        HPEN oldPen = reinterpret_cast<HPEN>(SelectObject(dc, arrowPen));
+        MoveToEx(dc, centerX - 4, centerY - 2, nullptr);
+        LineTo(dc, centerX, centerY + 2);
+        LineTo(dc, centerX + 4, centerY - 2);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldFont);
+        DeleteObject(arrowPen);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if (msg == WM_NCPAINT) return 0;
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, ComboProc, 1);
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static void ApplyDarkControlTheme(HWND control) {
+    HMODULE theme = LoadLibraryA("uxtheme.dll");
+    if (!theme) return;
+    using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+    auto setWindowTheme = reinterpret_cast<SetWindowThemeFn>(
+        GetProcAddress(theme, "SetWindowTheme"));
+    if (setWindowTheme) {
+        setWindowTheme(control, L"DarkMode_Explorer", nullptr);
+    }
+    FreeLibrary(theme);
+}
+}
+
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static int modifierOnlyCandidate = HOTKEY_MOD_NONE;
     static HWND combo = nullptr;
     static HWND status = nullptr;
     static HWND history = nullptr;
     static HWND clearButton = nullptr;
     static bool captureWaitingForRelease = false;
+    static int activeTab = IDC_TAB_ACTIVITY;
+    static std::vector<HWND> languageControls;
+    static std::vector<HWND> shortcutControls;
+    static std::vector<HWND> activityControls;
+
+    const auto showTab = [&](int tabId) {
+        activeTab = tabId;
+        const auto showControls = [&](const std::vector<HWND>& controls, bool visible) {
+            for (HWND control : controls) ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
+        };
+        showControls(languageControls, tabId == IDC_TAB_LANGUAGE);
+        showControls(shortcutControls, tabId == IDC_TAB_SHORTCUTS);
+        showControls(activityControls, tabId == IDC_TAB_ACTIVITY);
+        InvalidateRect(hwnd, nullptr, TRUE);
+    };
 
     switch (msg) {
     case WM_APP_STT_TEXT: {
@@ -797,27 +938,56 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             );
 
             SendMessageW(g_history, EM_SCROLLCARET, 0, 0);
+            RedrawWindow(g_history, nullptr, nullptr,
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
         }
         free(value);
         return 0;
     }
     case WM_APP_STT_STATUS: {
         char* value = reinterpret_cast<char*>(lParam);
-        if (g_status && value) SetWindowTextA(g_status, value);
+        if (g_status && value) {
+            SetWindowTextA(g_status, value);
+            RECT redraw{};
+            GetWindowRect(g_status, &redraw);
+            MapWindowPoints(nullptr, hwnd, reinterpret_cast<POINT*>(&redraw), 2);
+            InflateRect(&redraw, 3, 2);
+            RedrawWindow(hwnd, &redraw, nullptr,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        }
         free(value);
         return 0;
     }
 
     case WM_CREATE: {
-        CreateWindowA("STATIC", "Language:",
-            WS_CHILD | WS_VISIBLE,
-            20, 18, 80, 20,
-            hwnd, nullptr, nullptr, nullptr);
+        using namespace SettingsUi;
+        backgroundBrush = CreateSolidBrush(Background);
+        surfaceBrush = CreateSolidBrush(Surface);
+        fieldBrush = CreateSolidBrush(SurfaceRaised);
+        titleFont = MakeFont(22, FW_SEMIBOLD);
+        headingFont = MakeFont(16, FW_SEMIBOLD);
+        bodyFont = MakeFont(14, FW_NORMAL);
+        smallFont = MakeFont(12, FW_NORMAL);
+
+        Label(hwnd, "SpeechHelper", 32, 18, 210, 30, titleFont);
+        Label(hwnd, "Speech-to-text for Windows", 32, 48, 340, 20, smallFont);
+
+        Button(hwnd, "Language", IDC_TAB_LANGUAGE, 32, 82, 112, 34);
+        Button(hwnd, "Shortcuts", IDC_TAB_SHORTCUTS, 152, 82, 112, 34);
+        Button(hwnd, "Activity", IDC_TAB_ACTIVITY, 272, 82, 112, 34);
+
+        languageControls.push_back(Label(hwnd, "Recognition language", 60, 164, 170, 22));
 
         combo = CreateWindowA("COMBOBOX", "",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            100, 14, 200, 250,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED |
+                CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP,
+            238, 157, 236, 280,
             hwnd, reinterpret_cast<HMENU>(IDC_LANGUAGE), nullptr, nullptr);
+        SetFont(combo, bodyFont);
+        SetWindowSubclass(combo, ComboProc, 1, 0);
+        SendMessageA(combo, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), 30);
+        SendMessageA(combo, CB_SETITEMHEIGHT, 0, 28);
+        languageControls.push_back(combo);
 
         for (const auto& lang : kLanguages) {
             SendMessageA(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(lang.label));
@@ -826,65 +996,166 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         const std::string current = LoadLanguageCode();
         SendMessageA(combo, CB_SETCURSEL, FindLanguageIndex(current), 0);
 
-        CreateWindowA("BUTTON", "Apply",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            315, 14, 80, 25,
-            hwnd, reinterpret_cast<HMENU>(IDC_SAVE), nullptr, nullptr);
+        languageControls.push_back(Button(hwnd, "Apply", IDC_SAVE, 490, 156, 82, 34));
 
-        CreateWindowA("STATIC", "Talk:",
-            WS_CHILD | WS_VISIBLE,
-            20, 54, 45, 20,
-            hwnd, nullptr, nullptr, nullptr);
+        // Normal speech stays separate.
+        shortcutControls.push_back(Label(hwnd, "Talk", 60, 154, 72, 22));
 
         g_hotkeyValue = CreateWindowA(
             "STATIC",
-            HotkeyBindingName(g_hotkeyMods.load(), g_hotkeyVk.load()).c_str(),
-            WS_CHILD | WS_VISIBLE,
-            70, 54, 120, 20,
+            HotkeyBindingName(
+                g_hotkeyMods.load(),
+                g_hotkeyVk.load()
+            ).c_str(),
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
+            132, 151, 190, 26,
             hwnd, nullptr, nullptr, nullptr);
+        SetFont(g_hotkeyValue, bodyFont);
+        shortcutControls.push_back(g_hotkeyValue);
 
-        CreateWindowA("BUTTON", "Change",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            195, 50, 80, 25,
-            hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_NORMAL_CHANGE)),
-            nullptr, nullptr);
+        shortcutControls.push_back(Button(hwnd, "Change", IDC_NORMAL_CHANGE, 338, 147, 96, 34));
 
-        CreateWindowA("STATIC", "Status:",
-            WS_CHILD | WS_VISIBLE,
-            20, 94, 80, 20,
-            hwnd, nullptr, nullptr, nullptr);
+        shortcutControls.push_back(resetButton = Button(hwnd, "Reset shortcuts",
+            IDC_RESET_SHORTCUTS, 60, 316, 132, 34));
+
+        activityControls.push_back(Label(hwnd, "Status", 52, 148, 58, 22, smallFont));
 
         status = CreateWindowA("STATIC", "Ready",
             WS_CHILD | WS_VISIBLE,
-            100, 94, 210, 20,
+            116, 146, 260, 24,
             hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
+        SetFont(status, bodyFont);
         g_status = status;
+        activityControls.push_back(status);
 
-        CreateWindowA("STATIC", "Conversation history:",
-            WS_CHILD | WS_VISIBLE,
-            20, 128, 180, 20,
-            hwnd, nullptr, nullptr, nullptr);
+        activityControls.push_back(Label(hwnd, "Conversation history", 52, 184, 220, 22));
 
         RECT rc{};
         GetClientRect(hwnd, &rc);
 
         history = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            0, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL |
             ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | ES_WANTRETURN,
-            20, 152,
-            (std::max)(200L, rc.right - 40),
-            (std::max)(120L, rc.bottom - 202),
+            52, 214,
+            (std::max)(300L, rc.right - 104),
+            (std::max)(140L, rc.bottom - 288),
             hwnd, reinterpret_cast<HMENU>(IDC_HISTORY), nullptr, nullptr);
+        SetFont(history, bodyFont);
+        ApplyDarkControlTheme(history);
         g_history = history;
+        activityControls.push_back(history);
 
-        clearButton = CreateWindowA("BUTTON", "Clear history",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            20, (std::max)(156L, rc.bottom - 40), 110, 30,
-            hwnd, reinterpret_cast<HMENU>(IDC_CLEAR), nullptr, nullptr);
+        activityControls.push_back(clearButton = Button(hwnd, "Clear history", IDC_CLEAR,
+            52, (std::max)(374L, rc.bottom - 54), 116, 34));
+
+        showTab(IDC_TAB_ACTIVITY);
 
         return 0;
+    }
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT: {
+        using namespace SettingsUi;
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        FillRect(dc, &client, backgroundBrush);
+        RECT contentCard{32, 128, client.right - 32, client.bottom - 16};
+        FillRoundedRect(dc, contentCard, Surface, 16);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+        using namespace SettingsUi;
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        HWND control = reinterpret_cast<HWND>(lParam);
+        if (control == history) {
+            SetBkMode(dc, OPAQUE);
+            SetBkColor(dc, SurfaceRaised);
+            SetTextColor(dc, Text);
+            return reinterpret_cast<LRESULT>(fieldBrush);
+        }
+        if (control == status) {
+            SetBkMode(dc, OPAQUE);
+            SetBkColor(dc, Surface);
+            SetTextColor(dc, Success);
+            return reinterpret_cast<LRESULT>(surfaceBrush);
+        }
+        if (control == g_hotkeyValue) {
+                SetBkMode(dc, OPAQUE);
+                SetBkColor(dc, Surface);
+                SetTextColor(dc, Text);
+                return reinterpret_cast<LRESULT>(surfaceBrush);
+        }
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, Text);
+        return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
+    }
+
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX: {
+        using namespace SettingsUi;
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(dc, Text);
+        SetBkColor(dc, SurfaceRaised);
+        return reinterpret_cast<LRESULT>(fieldBrush);
+    }
+
+    case WM_DRAWITEM: {
+        using namespace SettingsUi;
+        auto* item = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+        if (!item) break;
+        if (item->CtlType == ODT_COMBOBOX) {
+            HBRUSH comboBrush = (item->itemState & ODS_SELECTED)
+                ? surfaceBrush : fieldBrush;
+            FillRect(item->hDC, &item->rcItem, comboBrush);
+            if (item->itemID != static_cast<UINT>(-1)) {
+                char text[80]{};
+                SendMessageA(item->hwndItem, CB_GETLBTEXT, item->itemID,
+                    reinterpret_cast<LPARAM>(text));
+                RECT textRect = item->rcItem;
+                textRect.left += 12;
+                SetBkMode(item->hDC, TRANSPARENT);
+                SetTextColor(item->hDC, Text);
+                HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(item->hDC, bodyFont));
+                DrawTextA(item->hDC, text, -1, &textRect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(item->hDC, oldFont);
+            }
+            return TRUE;
+        }
+        if (item->CtlType != ODT_BUTTON) break;
+        const bool pressed = (item->itemState & ODS_SELECTED) != 0;
+        const bool disabled = (item->itemState & ODS_DISABLED) != 0;
+        const bool primary = item->CtlID == IDC_SAVE;
+        const bool tab = item->CtlID >= IDC_TAB_LANGUAGE && item->CtlID <= IDC_TAB_ACTIVITY;
+        const bool selectedTab = tab && static_cast<int>(item->CtlID) == activeTab;
+        COLORREF fill = primary ? (pressed ? AccentHover : Accent)
+                                : (selectedTab ? Accent : (pressed ? Border : SurfaceRaised));
+        const COLORREF behind = tab ? Background : Surface;
+        HBRUSH behindBrush = CreateSolidBrush(behind);
+        FillRect(item->hDC, &item->rcItem, behindBrush);
+        DeleteObject(behindBrush);
+        FillRoundedRect(item->hDC, item->rcItem, fill, 10);
+        char text[80]{};
+        GetWindowTextA(item->hwndItem, text, static_cast<int>(sizeof(text)));
+        SetBkMode(item->hDC, TRANSPARENT);
+        SetTextColor(item->hDC, disabled ? Muted : Text);
+        HFONT oldFont = reinterpret_cast<HFONT>(SelectObject(item->hDC, bodyFont));
+        DrawTextA(item->hDC, text, -1, &item->rcItem,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(item->hDC, oldFont);
+        if (item->itemState & ODS_FOCUS) {
+            RECT focus = item->rcItem;
+            InflateRect(&focus, -4, -4);
+            DrawFocusRect(item->hDC, &focus);
+        }
+        return TRUE;
     }
 
     case WM_SIZE: {
@@ -894,9 +1165,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         if (history) {
             MoveWindow(
                 history,
-                20, 152,
-                (std::max)(200, clientW - 40),
-                (std::max)(120, clientH - 202),
+                52, 214,
+                (std::max)(300, clientW - 104),
+                (std::max)(140, clientH - 288),
                 TRUE
             );
         }
@@ -904,11 +1175,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         if (clearButton) {
             MoveWindow(
                 clearButton,
-                20, (std::max)(156, clientH - 40),
-                110, 30,
+                52, (std::max)(374, clientH - 54),
+                116, 34,
                 TRUE
             );
         }
+
+        RedrawWindow(hwnd, nullptr, nullptr,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 
         return 0;
     }
@@ -916,8 +1190,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     case WM_GETMINMAXINFO: {
         auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
         if (info) {
-            info->ptMinTrackSize.x = 580;
-            info->ptMinTrackSize.y = 420;
+            info->ptMinTrackSize.x = 620;
+            info->ptMinTrackSize.y = 500;
         }
         return 0;
     }
@@ -927,8 +1201,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             if (captureWaitingForRelease) {
                 if (!AnyCaptureKeyDown()) {
                     captureWaitingForRelease = false;
-                    if (g_hotkeyValue)
-                        SetWindowTextA(g_hotkeyValue, "Press shortcut...");
+                    SetHotkeyValueText(g_hotkeyValue, "Press shortcut...");
                 }
                 return 0;
             }
@@ -937,14 +1210,31 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             const int key = FindCaptureMainKey();
 
             if (key == 0) {
-                if (mods != HOTKEY_MOD_NONE && g_hotkeyValue) {
-                    const std::string preview =
-                        HotkeyBindingName(mods, 0) + " + ...";
-                    SetWindowTextA(g_hotkeyValue, preview.c_str());
+                if (mods != HOTKEY_MOD_NONE) {
+                    modifierOnlyCandidate = mods;
+
+                    if (g_hotkeyValue) {
+                        const std::string preview = HotkeyBindingName(mods, 0);
+                        SetHotkeyValueText(g_hotkeyValue, preview.c_str());
+                    }
+
+                    return 0;
                 }
+
+                if (modifierOnlyCandidate != HOTKEY_MOD_NONE) {
+                    SaveHotkeyBinding(modifierOnlyCandidate, 0);
+
+                    modifierOnlyCandidate = HOTKEY_MOD_NONE;
+                    g_capturingHotkey.store(false);
+                    captureWaitingForRelease = false;
+                    KillTimer(hwnd, HOTKEY_CAPTURE_TIMER);
+                    return 0;
+                }
+
                 return 0;
             }
 
+            // Save only a non-modifier main key.
             SaveHotkeyBinding(mods, key);
 
             g_capturingHotkey.store(false);
@@ -961,21 +1251,33 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     case WM_MBUTTONDOWN:
     case WM_XBUTTONDOWN:
         if (g_capturingHotkey.load()) {
-            // Capture is handled only by WM_TIMER + GetAsyncKeyState.
             return 0;
         }
         break;
-
+    case WM_SYSCHAR:
+        if (!g_capturingHotkey.load()) {
+            return 0;
+        }
+    break;
+    case WM_SYSCOMMAND:
+        if (g_capturingHotkey.load() &&
+            (wParam & 0xFFF0) == SC_KEYMENU) {
+            return 0;
+        }
+        break;
     case WM_COMMAND: {
         const int commandId = LOWORD(wParam);
 
+        if (commandId >= IDC_TAB_LANGUAGE && commandId <= IDC_TAB_ACTIVITY) {
+            showTab(commandId);
+            return 0;
+        }
         if (commandId == IDC_NORMAL_CHANGE) {
             captureWaitingForRelease = true;
+            modifierOnlyCandidate = HOTKEY_MOD_NONE;
             g_capturingHotkey.store(true);
 
-            if (g_hotkeyValue)
-                SetWindowTextA(g_hotkeyValue, "Release, then press...");
-
+            SetHotkeyValueText(g_hotkeyValue, "Release, then press...");
             SetTimer(hwnd, HOTKEY_CAPTURE_TIMER, 15, nullptr);
             SetFocus(hwnd);
             return 0;
@@ -998,6 +1300,15 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             return 0;
         }
 
+        if (commandId == IDC_RESET_SHORTCUTS) {
+            g_hotkeyMods.store(HOTKEY_MOD_NONE);
+            g_hotkeyVk.store(VK_LMENU);
+
+            WriteConfig(LoadLanguageCode());
+            RefreshHotkeyLabelFromSavedBinding();
+            return 0;
+        }
+
         break;
     }
 
@@ -1007,10 +1318,19 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         return 0;
 
     case WM_DESTROY:
+        DeleteObject(SettingsUi::backgroundBrush);
+        DeleteObject(SettingsUi::surfaceBrush);
+        DeleteObject(SettingsUi::fieldBrush);
+        DeleteObject(SettingsUi::titleFont);
+        DeleteObject(SettingsUi::headingFont);
+        DeleteObject(SettingsUi::bodyFont);
+        DeleteObject(SettingsUi::smallFont);
         PostQuitMessage(0);
         ExitProcess(0);
         return 0;
     }
+
+
 
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
@@ -1023,7 +1343,7 @@ static void SettingsWindowThread() {
     wc.hInstance = hInst;
     wc.lpszClassName = "SpeechHelperSettingsWindow";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hbrBackground = CreateSolidBrush(SettingsUi::Background);
     wc.hIcon = LoadIconA(hInst, MAKEINTRESOURCEA(101));
 
     RegisterClassA(&wc);
@@ -1031,13 +1351,26 @@ static void SettingsWindowThread() {
     HWND hwnd = CreateWindowExA(
         0,
         wc.lpszClassName,
-        "SpeechHelper",
+        "SpeechHelper - Hakk0ni Edition",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
-        620, 600,
+        760, 650,
         nullptr, nullptr, hInst, nullptr);
 
     if (!hwnd) return;
+
+    // Ask supported Windows versions for a dark title bar without adding a
+    // hard dependency on dwmapi.dll.
+    if (HMODULE dwm = LoadLibraryA("dwmapi.dll")) {
+        using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+        auto setAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
+            GetProcAddress(dwm, "DwmSetWindowAttribute"));
+        if (setAttribute) {
+            const BOOL enabled = TRUE;
+            setAttribute(hwnd, 20, &enabled, sizeof(enabled));
+        }
+        FreeLibrary(dwm);
+    }
 
     SendMessageA(hwnd, WM_SETICON, ICON_BIG,
         reinterpret_cast<LPARAM>(LoadIconA(hInst, MAKEINTRESOURCEA(101))));
@@ -1058,6 +1391,8 @@ static void SettingsWindowThread() {
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     SetConsoleOutputCP(CP_UTF8);
 
+    // Load persistent bindings before the settings window is created so the
+    // GUI never briefly shows the old default while config.txt is being read.
     g_hotkeyMods.store(LoadHotkeyMods());
     g_hotkeyVk.store(LoadHotkeyVk());
 
@@ -1078,10 +1413,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     std::cout << "SpeechHelper v4-small\n";
     std::cout << "Portable / offline prototype\n";
     std::cout << "sherpa-onnx: " << SherpaOnnxGetVersionStr() << "\n";
-    std::cout << "Talk: "
-              << HotkeyBindingName(g_hotkeyMods.load(), g_hotkeyVk.load())
-              << "\n";
-    std::cout << "ESC: exit\n\n";
+    std::cout << "Talk: " << HotkeyBindingName(g_hotkeyMods.load(), g_hotkeyVk.load()) << "\n";
 
     if (!fs::exists(encoder) ||
         !fs::exists(decoder) ||
@@ -1110,7 +1442,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     std::cout << "[STT] ready\n\n";
 
     AudioCapture capture;
-
     bool captureActive = false;
 
     while (true) {
@@ -1130,10 +1461,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
             }
         }
 
-        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
-            break;
-        }
 
+        // While the settings window is capturing a new binding, the normal
+        // speech hotkey must be completely disabled. This prevents ALT/CTRL/etc.
+        // from starting a recording at the same time as key capture.
         if (g_capturingHotkey.load()) {
             if (captureActive) {
                 capture.Stop();
@@ -1160,10 +1491,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                 static_cast<double>(kSampleRate);
 
             PostUiStatus("Transcribing");
-            std::cout
-                << "[HOTKEY] captured "
-                << seconds
-                << " sec\n";
+            std::cout << "[HOTKEY] captured " << seconds << " sec\n";
 
             float rms = 0.0f;
             if (!samples.empty()) {
@@ -1182,13 +1510,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                 std::cout << "[HOTKEY] ignored: silence/noise floor"
                           << " (rms=" << rms << ")\n\n";
             } else {
-                const auto startTime =
-                    std::chrono::steady_clock::now();
-
+                const auto startTime = std::chrono::steady_clock::now();
                 std::string recognized = stt.Transcribe(samples);
-
-                const auto endTime =
-                    std::chrono::steady_clock::now();
+                const auto endTime = std::chrono::steady_clock::now();
 
                 const double elapsed =
                     std::chrono::duration<double>(endTime - startTime).count();
@@ -1205,8 +1529,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                 } else {
                     PostUiText(recognized);
 
-                    const bool typed =
-                        SendTextToFocusedInput(recognized);
+                    const bool typed = SendTextToFocusedInput(recognized);
 
                     PostUiStatus(typed ? "Ready" : "Input send failed");
                     std::cout << "[TEXT] " << recognized << "\n";
