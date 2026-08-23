@@ -1,4 +1,5 @@
-﻿#define WIN32_LEAN_AND_MEAN
+﻿
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
 #include <mmsystem.h>
@@ -646,6 +647,34 @@ static void PostUiText(const std::string& value) {
     PostMessageA(g_mainWindow, WM_APP_STT_TEXT, 0, reinterpret_cast<LPARAM>(copy));
 }
 
+static bool SendTextToFocusedInput(const std::string& value) {
+    const std::wstring wide = Utf8ToWide(value);
+    if (wide.empty()) return false;
+
+    std::vector<INPUT> inputs;
+    inputs.reserve(wide.size() * 2);
+
+    for (wchar_t ch : wide) {
+        INPUT down{};
+        down.type = INPUT_KEYBOARD;
+        down.ki.wScan = ch;
+        down.ki.dwFlags = KEYEVENTF_UNICODE;
+        inputs.push_back(down);
+
+        INPUT up = down;
+        up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        inputs.push_back(up);
+    }
+
+    const UINT sent = SendInput(
+        static_cast<UINT>(inputs.size()),
+        inputs.data(),
+        sizeof(INPUT)
+    );
+
+    return sent == inputs.size();
+}
+
 static bool IsNonSpeechLabel(const std::string& raw) {
     std::string s = raw;
     s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
@@ -1175,8 +1204,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
                               << recognized << "\n\n";
                 } else {
                     PostUiText(recognized);
-                    PostUiStatus("Ready");
-                    std::cout << "[TEXT] " << recognized << "\n\n";
+
+                    const bool typed =
+                        SendTextToFocusedInput(recognized);
+
+                    PostUiStatus(typed ? "Ready" : "Input send failed");
+                    std::cout << "[TEXT] " << recognized << "\n";
+                    std::cout << "[INPUT] "
+                              << (typed ? "sent" : "send failed")
+                              << "\n\n";
                 }
             }
         }
