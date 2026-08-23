@@ -364,6 +364,7 @@ static std::atomic<int> g_hotkeyVk{VK_LMENU};
 static std::atomic<bool> g_capturingHotkey{false};
 static HWND g_hotkeyValue = nullptr;
 static HHOOK g_keyboardHook = nullptr;
+static std::atomic<bool> g_hookHotkeyDown{false};
 
 static bool ModifierMaskDown(int mods);
 
@@ -380,6 +381,7 @@ static LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wParam, LPARAM lParam)
     }
 
     if (g_capturingHotkey.load()) {
+        g_hookHotkeyDown.store(false);
         return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
     }
 
@@ -388,18 +390,30 @@ static LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wParam, LPARAM lParam)
         return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
     }
 
-    const int mods = g_hotkeyMods.load();
-    if (!ModifierMaskDown(mods)) {
-        return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
+    const bool keyDown =
+        wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN;
+    const bool keyUp =
+        wParam == WM_KEYUP || wParam == WM_SYSKEYUP;
+
+    if (keyDown) {
+        const int mods = g_hotkeyMods.load();
+
+        if (ModifierMaskDown(mods)) {
+            g_hookHotkeyDown.store(true);
+            return 1;
+        }
     }
 
-    if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+    if (keyUp && g_hookHotkeyDown.exchange(false)) {
+        return 1;
+    }
+
+    if (g_hookHotkeyDown.load()) {
         return 1;
     }
 
     return CallNextHookEx(g_keyboardHook, code, wParam, lParam);
 }
-
 
 static bool IsModifierVk(int vk) {
     return vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT ||
@@ -547,10 +561,11 @@ static bool IsSpeechHotkeyDown() {
     const int mods = g_hotkeyMods.load();
     const int key = g_hotkeyVk.load();
 
-    if (!ModifierMaskDown(mods)) return false;
-    if (key == 0) return mods != HOTKEY_MOD_NONE;
+    if (key == 0) {
+        return mods != HOTKEY_MOD_NONE && ModifierMaskDown(mods);
+    }
 
-    return (GetAsyncKeyState(key) & 0x8000) != 0;
+    return g_hookHotkeyDown.load();
 }
 
 static int LegacyModifierVkToMask(int vk) {
@@ -1368,6 +1383,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
 static void SettingsWindowThread() {
     HINSTANCE hInst = GetModuleHandleA(nullptr);
+
+    g_hookHotkeyDown.store(false);
 
     g_keyboardHook = SetWindowsHookExA(
         WH_KEYBOARD_LL,
